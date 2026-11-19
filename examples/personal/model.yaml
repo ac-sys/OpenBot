@@ -1,4 +1,4 @@
 model:
   provider: openai
   credential_secret_ref: openai-api-key
-  default_model: local-fast
+  default_model: gemini-3.5-flash-lite
