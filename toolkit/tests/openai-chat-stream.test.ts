@@ -3,6 +3,7 @@ import type { BuiltInAgentConfiguration } from "@copilotkit/runtime/v2";
 import { z } from "zod";
 import { BuiltInAgentWithSaneHistory } from "../src/copilotkit/agents";
 import {
+  injectThoughtSignatures,
   normalizeChatCompletionsSse,
   resolveCompatibleModel,
 } from "../src/copilotkit/openai-chat-stream";
@@ -502,5 +503,199 @@ describe("BuiltInAgentWithSaneHistory on an endpoint that omits delta.tool_calls
       expect(assistant.toolCalls?.[0]?.function.name).toBe("render_ui");
       expect(assistant.toolCalls?.[0]?.function.arguments).toBe(renderUiArgs);
     }
+  });
+
+  test("round-trips Gemini 3 thought_signature across multi-step tool calls", async () => {
+    const expectedSig = "EnsKeQFpFH0T-synthetic-thought-signature";
+    let step = 0;
+    let receivedStep2Sig: unknown;
+
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        step += 1;
+        const body = (await request.json()) as {
+          messages?: Array<{
+            role?: string;
+            tool_calls?: Array<{
+              id?: string;
+              extra_content?: { google?: { thought_signature?: string } };
+            }>;
+          }>;
+        };
+        if (step === 1) {
+          const toolChunk = {
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      id: "call_gemini3_search_1",
+                      type: "function",
+                      function: {
+                        name: "web_search",
+                        arguments: '{"query":"over 1.5 goals"}',
+                      },
+                      extra_content: {
+                        google: { thought_signature: expectedSig },
+                      },
+                    },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+            model: "gemini-3.5-flash-lite",
+            object: "chat.completion.chunk",
+          };
+          return new Response(
+            `data: ${JSON.stringify(toolChunk)}\n\ndata: [DONE]\n\n`,
+            {
+              headers: { "content-type": "text/event-stream; charset=utf-8" },
+            },
+          );
+        }
+
+        const assistantCall = body.messages?.find(
+          (m) => m.role === "assistant" && m.tool_calls?.length,
+        )?.tool_calls?.[0];
+        receivedStep2Sig =
+          assistantCall?.extra_content?.google?.thought_signature;
+        if (receivedStep2Sig !== expectedSig) {
+          return Response.json(
+            {
+              error: {
+                code: 400,
+                message: "Function call is missing a thought_signature",
+              },
+            },
+            { status: 400 },
+          );
+        }
+
+        const answerChunk = {
+          choices: [
+            {
+              index: 0,
+              delta: {
+                role: "assistant",
+                content: "Found the top teams from web search.",
+              },
+              finish_reason: "stop",
+            },
+          ],
+          model: "gemini-3.5-flash-lite",
+          object: "chat.completion.chunk",
+        };
+        return new Response(
+          `data: ${JSON.stringify(answerChunk)}\n\ndata: [DONE]\n\n`,
+          {
+            headers: { "content-type": "text/event-stream; charset=utf-8" },
+          },
+        );
+      },
+    });
+
+    process.env.OPENAI_BASE_URL = `http://127.0.0.1:${server.port}/v1`;
+    process.env.COPILOTKIT_OPENAI_API = "chat";
+
+    const agent = new BuiltInAgentWithSaneHistory(
+      {
+        model: "openai/gemini-3.5-flash-lite",
+        apiKey: "synthetic-gemini-key",
+        prompt: "Be helpful.",
+        maxSteps: 4,
+        tools: [
+          {
+            name: "web_search",
+            description: "Search the web.",
+            parameters: z.object({ query: z.string() }),
+            execute: async () => ({ results: ["Eredivisie: PSV, Ajax"] }),
+          },
+        ],
+      } as BuiltInAgentConfiguration,
+      {
+        inline: async (messages) => messages,
+        observe: (events) => events,
+      },
+    );
+    agent.addMessage({
+      id: "m1",
+      role: "user",
+      content: "Find the teams.",
+    });
+
+    await agent.runAgent();
+
+    expect(step).toBe(2);
+    expect(receivedStep2Sig).toBe(expectedSig);
+    expect(agent.messages.at(-1)?.content).toBe(
+      "Found the top teams from web search.",
+    );
+  });
+});
+
+describe("injectThoughtSignatures", () => {
+  test("injects cached signature, falls back to Gemini sentinel on persisted calls, and leaves non-Gemini models untouched", () => {
+    const cache = new Map([["call-cached", "sig-real-123"]]);
+    const geminiReq = JSON.stringify({
+      model: "gemini-3.5-flash-lite",
+      messages: [
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              id: "call-cached",
+              type: "function",
+              function: { name: "a", arguments: "{}" },
+            },
+            {
+              id: "call-persisted",
+              type: "function",
+              function: { name: "b", arguments: "{}" },
+            },
+          ],
+        },
+      ],
+    });
+    const updated = injectThoughtSignatures(geminiReq, cache);
+    expect(updated).not.toBeNull();
+    const parsed = JSON.parse(updated ?? "{}") as {
+      messages: [
+        {
+          tool_calls: Array<{
+            extra_content?: { google?: { thought_signature?: string } };
+          }>;
+        },
+      ];
+    };
+    expect(
+      parsed.messages[0].tool_calls[0]?.extra_content?.google
+        ?.thought_signature,
+    ).toBe("sig-real-123");
+    expect(
+      parsed.messages[0].tool_calls[1]?.extra_content?.google
+        ?.thought_signature,
+    ).toBe("skip_thought_signature_validator");
+
+    const nonGeminiReq = JSON.stringify({
+      model: "local-fast",
+      messages: [
+        {
+          role: "assistant",
+          tool_calls: [
+            {
+              id: "call-unknown",
+              type: "function",
+              function: { name: "a", arguments: "{}" },
+            },
+          ],
+        },
+      ],
+    });
+    expect(injectThoughtSignatures(nonGeminiReq, cache)).toBeNull();
   });
 });

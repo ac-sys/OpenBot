@@ -19,22 +19,46 @@ type ChoiceToolCallState = {
   lastIndex?: number;
 };
 
+const MAX_THOUGHT_SIGNATURES = 2000;
+/**
+ * Google's official bypass sentinel for replaying historical Gemini 3 tool calls whose original
+ * thought signature was not persisted (https://ai.google.dev/gemini-api/docs/thought-signatures).
+ */
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
+
 const wrappedFetches = new WeakSet<typeof fetch>();
+const thoughtSignatures = new Map<string, string>();
+
+function rememberThoughtSignature(toolCallId: string, signature: string): void {
+  if (!toolCallId || !signature) return;
+  if (thoughtSignatures.has(toolCallId)) {
+    thoughtSignatures.delete(toolCallId);
+  } else if (thoughtSignatures.size >= MAX_THOUGHT_SIGNATURES) {
+    const oldest = thoughtSignatures.keys().next().value;
+    if (oldest !== undefined) thoughtSignatures.delete(oldest);
+  }
+  thoughtSignatures.set(toolCallId, signature);
+}
 
 /**
  * Resolve a built-in Bot's model through the runtime's `resolveModel`, normalizing OpenAI Chat
- * Completions SSE streams whose tool-call deltas omit `index`.
+ * Completions streams and requests for OpenAI-compatible providers (such as Google Gemini).
  *
- * WHY. `@ai-sdk/openai`'s `openaiChatChunkSchema` requires `choices[i].index` and
- * `choices[i].delta.tool_calls[j].index` to be numbers. Some OpenAI-compatible Chat Completions
- * endpoints — notably Google's Gemini endpoint (`generativelanguage.googleapis.com/v1beta/openai`)
- * — omit `delta.tool_calls[j].index` on streamed tool calls, causing every tool call (including
- * `render_ui`) to fail Zod validation before the tool executes.
+ * WHY.
+ * 1. `@ai-sdk/openai`'s `openaiChatChunkSchema` requires `choices[i].index` and
+ *    `choices[i].delta.tool_calls[j].index` to be numbers. Some OpenAI-compatible Chat Completions
+ *    endpoints (notably `generativelanguage.googleapis.com/v1beta/openai`) omit
+ *    `delta.tool_calls[j].index` on streamed tool calls, failing Zod validation before execution.
+ * 2. Gemini 3.x models attach an opaque `extra_content.google.thought_signature` to streamed tool
+ *    calls and reject multi-turn tool continuations with HTTP 400 if it is not echoed back.
+ *    `@ai-sdk/openai` strips `extra_content` when parsing `delta.tool_calls`.
  *
- * HOW. Attach a `fetch` wrapper to resolved `openai.chat` models so `text/event-stream` responses
- * have missing choice / tool-call indices filled deterministically before `@ai-sdk/openai` parses
- * each SSE frame. Compliant streams pass through untouched; non-chat models (OpenAI Responses API,
- * Anthropic, Google native, plan models) are returned as-is.
+ * HOW. Attach a per-model `fetch` wrapper to resolved `openai.chat` models so:
+ * - Incoming `text/event-stream` frames have missing choice/tool-call indices filled deterministically
+ *   and any `thought_signature` cached by `tool_call.id` before `@ai-sdk/openai` parses them.
+ * - Outgoing Chat Completions requests re-attach cached `extra_content.google.thought_signature`
+ *   onto assistant `tool_calls` (falling back to Google's `skip_thought_signature_validator`
+ *   sentinel only for Gemini models on older persisted tool calls not in memory).
  */
 export function resolveCompatibleModel(
   spec: BuiltInAgentClassicConfig["model"],
@@ -46,8 +70,8 @@ export function resolveCompatibleModel(
 }
 
 /**
- * Wrap a built-in agent configuration's model so OpenAI-compatible Chat Completions streams with
- * missing `delta.tool_calls[].index` pass `@ai-sdk/openai` chunk validation.
+ * Wrap a built-in agent configuration's model so OpenAI-compatible Chat Completions streams and
+ * multi-turn Gemini 3 tool calls work cleanly through `@ai-sdk/openai`.
  */
 export function normalizeOpenAIChatStream(
   configuration: BuiltInAgentConfiguration,
@@ -77,29 +101,158 @@ function wrapChatCompletionsFetch(baseFetch?: typeof fetch): typeof fetch {
     input: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
   ) => {
+    const nextInit =
+      init && typeof init.body === "string"
+        ? withThoughtSignatures(init, init.body)
+        : init;
     // Resolve globalThis.fetch per call so test stubs installed after model creation still apply.
-    const response = await (baseFetch ?? globalThis.fetch)(input, init);
+    const response = await (baseFetch ?? globalThis.fetch)(input, nextInit);
     if (!response.ok || !response.body) return response;
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.toLowerCase().includes("text/event-stream")) {
-      return response;
+    const contentType = (
+      response.headers.get("content-type") ?? ""
+    ).toLowerCase();
+    if (contentType.includes("text/event-stream")) {
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      headers.delete("content-encoding");
+      return new Response(normalizeChatCompletionsSse(response.body), {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
     }
-    const headers = new Headers(response.headers);
-    headers.delete("content-length");
-    headers.delete("content-encoding");
-    return new Response(normalizeChatCompletionsSse(response.body), {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    });
+    if (contentType.includes("application/json")) {
+      const text = await response.text();
+      captureResponseThoughtSignatures(text);
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      headers.delete("content-encoding");
+      return new Response(text, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    }
+    return response;
   }) as typeof fetch;
   wrappedFetches.add(wrapped);
   return wrapped;
 }
 
+function withThoughtSignatures(
+  init: NonNullable<Parameters<typeof fetch>[1]>,
+  bodyText: string,
+): NonNullable<Parameters<typeof fetch>[1]> {
+  const updated = injectThoughtSignatures(bodyText);
+  if (updated === null) return init;
+  return { ...init, body: updated };
+}
+
+/**
+ * Re-attach captured `extra_content.google.thought_signature` values onto outgoing Chat Completions
+ * assistant `tool_calls`. Returns the updated JSON string only when modified, or `null` otherwise.
+ */
+export function injectThoughtSignatures(
+  bodyText: string,
+  signatures: ReadonlyMap<string, string> = thoughtSignatures,
+): string | null {
+  const trimmed = bodyText.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.messages)) return null;
+  const isGeminiModel =
+    typeof parsed.model === "string" && /gemini/i.test(parsed.model);
+
+  let modified = false;
+  for (const message of parsed.messages) {
+    if (
+      !isRecord(message) ||
+      message.role !== "assistant" ||
+      !Array.isArray(message.tool_calls)
+    ) {
+      continue;
+    }
+    for (const call of message.tool_calls) {
+      if (!isRecord(call)) continue;
+      if (extractThoughtSignature(call)) continue;
+      const id =
+        typeof call.id === "string" && call.id.length > 0 ? call.id : "";
+      const signature =
+        (id ? signatures.get(id) : undefined) ??
+        (isGeminiModel ? SKIP_THOUGHT_SIGNATURE_VALIDATOR : undefined);
+      if (!signature) continue;
+      const existingExtra = isRecord(call.extra_content)
+        ? call.extra_content
+        : {};
+      const existingGoogle = isRecord(existingExtra.google)
+        ? existingExtra.google
+        : {};
+      call.extra_content = {
+        ...existingExtra,
+        google: {
+          ...existingGoogle,
+          thought_signature: signature,
+        },
+      };
+      modified = true;
+    }
+  }
+  return modified ? JSON.stringify(parsed) : null;
+}
+
+function captureResponseThoughtSignatures(bodyText: string): void {
+  const trimmed = bodyText.trim();
+  if (!trimmed.startsWith("{")) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return;
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.choices)) return;
+  for (const choice of parsed.choices) {
+    if (!isRecord(choice) || !isRecord(choice.message)) continue;
+    const calls = choice.message.tool_calls;
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      if (!isRecord(call)) continue;
+      const id =
+        typeof call.id === "string" && call.id.length > 0 ? call.id : "";
+      const signature = extractThoughtSignature(call);
+      if (id && signature) rememberThoughtSignature(id, signature);
+    }
+  }
+}
+
+function extractThoughtSignature(call: Record<string, unknown>): string | null {
+  const extra = call.extra_content;
+  if (isRecord(extra) && isRecord(extra.google)) {
+    const sig = extra.google.thought_signature;
+    if (typeof sig === "string" && sig.length > 0) return sig;
+  }
+  const providerFields = call.provider_specific_fields;
+  if (isRecord(providerFields)) {
+    const direct = providerFields.thought_signature;
+    if (typeof direct === "string" && direct.length > 0) return direct;
+    if (
+      isRecord(providerFields.extra_content) &&
+      isRecord(providerFields.extra_content.google)
+    ) {
+      const nested = providerFields.extra_content.google.thought_signature;
+      if (typeof nested === "string" && nested.length > 0) return nested;
+    }
+  }
+  return null;
+}
+
 /**
  * Normalize an OpenAI Chat Completions SSE byte stream so every choice and streamed tool-call delta
- * carries a numeric `index`.
+ * carries a numeric `index`, while capturing any Gemini `thought_signature` per tool-call id.
  */
 export function normalizeChatCompletionsSse(
   body: ReadableStream<Uint8Array>,
@@ -234,6 +387,8 @@ function normalizeChunkPayload(
       if (!isRecord(call)) continue;
       const id =
         typeof call.id === "string" && call.id.length > 0 ? call.id : "";
+      const signature = extractThoughtSignature(call);
+      if (id && signature) rememberThoughtSignature(id, signature);
       if (typeof call.index === "number") {
         if (id) state.byId.set(id, call.index);
         state.lastIndex = call.index;
