@@ -329,7 +329,7 @@ export function chatCompletionsUrl(
   const base = (environment.OPENAI_BASE_URL?.trim() || "https://api.openai.com")
     // A trailing slash is the difference between `/v1` and `/v1/`, and no more than that.
     .replace(/\/+$/, "");
-  return /\/v\d+$/.test(base)
+  return /\/v\d+(?:(?:beta)?\/openai)?$/.test(base)
     ? `${base}/chat/completions`
     : `${base}/v1/chat/completions`;
 }

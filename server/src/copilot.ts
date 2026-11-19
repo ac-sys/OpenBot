@@ -13,7 +13,6 @@ import type {
 import {
   type CopilotKitIntelligence,
   CopilotRuntime,
-  resolveModel,
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import {
@@ -45,6 +44,7 @@ import {
 } from "@openbot/toolkit/copilotkit/agents";
 import { firingChecklist } from "@openbot/toolkit/copilotkit/firing-checklist";
 import { UNATTENDED_STEPS } from "@openbot/toolkit/copilotkit/last-step";
+import { resolveCompatibleModel } from "@openbot/toolkit/copilotkit/openai-chat-stream";
 import { createIntelligenceThreadLock } from "@openbot/toolkit/copilotkit/thread-lock";
 import type { GrantedTool, ToolExecution } from "@openbot/toolkit/granted-tool";
 import { parametersFor } from "@openbot/toolkit/granted-tool";
@@ -749,7 +749,7 @@ export function builtInAgentConfiguration(
   const unwrapped =
     waiting.size > 0
       ? (planModel ??
-        resolveModel(
+        resolveCompatibleModel(
           `${model.provider}/${model.defaultModel}`,
           apiKey ?? undefined,
         ))

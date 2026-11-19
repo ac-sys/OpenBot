@@ -23,9 +23,6 @@ import {
   takeUntil,
 } from "rxjs";
 import { sanitizeSeededHistory } from "../history-sanitize";
-import { firingChecklist } from "./firing-checklist";
-import { answersOnLastStep, type RunSteps, startRun } from "./last-step";
-import { oneMessagePerStep } from "./step-messages";
 import {
   type NativeRunScope,
   nativeApprovalRun,
@@ -39,6 +36,10 @@ import {
   bodyOf,
   expectedRefusal,
 } from "./expected-answers";
+import { firingChecklist } from "./firing-checklist";
+import { answersOnLastStep, type RunSteps, startRun } from "./last-step";
+import { normalizeOpenAIChatStream } from "./openai-chat-stream";
+import { oneMessagePerStep } from "./step-messages";
 
 /**
  * The CopilotKit agents OpenBot runs its Bots as: a built-in Bot that will not send a broken
@@ -243,7 +244,7 @@ export class BuiltInAgentWithSaneHistory extends BuiltInAgent {
       toolsWithin(
         // Outside the last step's wrapper, so a step it asks twice is still one message.
         oneMessagePerStep(
-          answersOnLastStep(configuration, steps, {
+          answersOnLastStep(normalizeOpenAIChatStream(configuration), steps, {
             unattended: hooks.unattended === true,
           }),
         ),

@@ -1,0 +1,71 @@
+# LiteLLM unified model switchboard for OpenBot.
+# Combines local Ollama models (primary, zero external API calls) with cloud Gemini
+# and optional Groq models behind one OpenAI-compatible endpoint (http://127.0.0.1:4000/v1).
+#
+# All credentials come from environment variables (never hardcoded here).
+
+model_list:
+  # --- Local models via host Ollama (free, private, offline) ---
+  - model_name: local-fast
+    litellm_params:
+      model: ollama_chat/qwen2.5:3b
+      api_base: os.environ/OLLAMA_API_BASE
+      keep_alive: 30m
+      num_ctx: 16384
+
+  - model_name: local-smart
+    litellm_params:
+      model: ollama_chat/qwen2.5:7b
+      api_base: os.environ/OLLAMA_API_BASE
+      keep_alive: 15m
+      num_ctx: 8192
+
+  # --- Cloud Gemini models (using GOOGLE_API_KEY from .env — for heavy research / large context) ---
+  - model_name: gemini-3.5-flash-lite
+    litellm_params:
+      model: openai/gemini-3.5-flash-lite
+      api_base: https://generativelanguage.googleapis.com/v1beta/openai
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: gemini-3.8-flash
+    litellm_params:
+      model: openai/gemini-3.8-flash
+      api_base: https://generativelanguage.googleapis.com/v1beta/openai
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: gemini-3.1-pro-preview
+    litellm_params:
+      model: openai/gemini-3.1-pro-preview
+      api_base: https://generativelanguage.googleapis.com/v1beta/openai
+      api_key: os.environ/GEMINI_API_KEY
+
+  # --- Optional free/fast Groq backup (add GROQ_API_KEY in .env to activate) ---
+  - model_name: groq-llama-70b
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: os.environ/GROQ_API_KEY
+
+  - model_name: groq-qwen-32b
+    litellm_params:
+      model: groq/qwen/qwen3-32b
+      api_key: os.environ/GROQ_API_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  timeout: 120
+  fallbacks:
+    - local-fast: ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    - local-smart: ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    - gemini-3.5-flash-lite: ["local-fast", "gemini-3.8-flash"]
+    - gemini-3.8-flash: ["gemini-3.5-flash-lite", "local-fast"]
+    - gemini-3.1-pro-preview: ["gemini-3.8-flash", "local-smart"]
+    - groq-llama-70b: ["gemini-3.5-flash-lite", "local-fast"]
+    - groq-qwen-32b: ["gemini-3.5-flash-lite", "local-fast"]
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

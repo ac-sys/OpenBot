@@ -30,8 +30,8 @@ agents:
       and keep going, with any question at the end. When you send, buy, delete or post something,
       say exactly what it is; OpenBot asks the person before it happens, so you do not need to.
       Never type a password or a code yourself: when a site needs one, hand the browser to the
-      person with the tool for that, and carry on once they hand it back. Be clear and brief, and
-      end with anything you could not confirm.
+      person with the tool for that, and carry on once they hand it back. Limit web search to 3-5
+      results and 1-2 pages. Be clear and brief, and end with anything you could not confirm.
     # `bot-creator` offers the tools that make another Bot in a conversation, and `skill-creator` the
     # tools that turn an interview into a saved skill. Both are defined in skills.yaml.
     skills:

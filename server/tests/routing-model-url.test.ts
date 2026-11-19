@@ -56,4 +56,23 @@ describe("chatCompletionsUrl", () => {
       chatCompletionsUrl({ OPENAI_BASE_URL: "https://x.test/v1beta" }),
     ).toBe("https://x.test/v1beta/v1/chat/completions");
   });
+
+  test("Google's OpenAI-compatible base URL (/v1beta/openai) is not given a trailing /v1", () => {
+    expect(
+      chatCompletionsUrl({
+        OPENAI_BASE_URL:
+          "https://generativelanguage.googleapis.com/v1beta/openai",
+      }),
+    ).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    );
+    expect(
+      chatCompletionsUrl({
+        OPENAI_BASE_URL:
+          "https://generativelanguage.googleapis.com/v1beta/openai/",
+      }),
+    ).toBe(
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    );
+  });
 });

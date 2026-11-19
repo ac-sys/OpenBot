@@ -270,6 +270,16 @@ if [ -z "$COMPOSIO_BEFORE" ] && [ -n "$(setting COMPOSIO_API_KEY "")" ]; then
 fi
 
 info "1/4  Docker services"
+# Start the local LiteLLM switchboard automatically when OPENAI_BASE_URL targets it.
+if [ -f "$ROOT/docker-compose.litellm.yml" ]; then
+  case "$(setting OPENAI_BASE_URL "")" in
+    http://127.0.0.1:4000*|http://localhost:4000*)
+      docker compose -f "$ROOT/docker-compose.litellm.yml" up -d >/dev/null 2>&1 \
+        && green "  litellm switchboard ready (http://127.0.0.1:4000/v1)" \
+        || red "  litellm switchboard did not start"
+      ;;
+  esac
+fi
 SERVICES=(postgres)
 if [ "$ONE_COMPUTER_EACH" = "true" ]; then
   SERVICES+=(supervisor)
@@ -544,8 +554,13 @@ JS
 
 info "4/4  App"
 require_free_or_ours "$APP_PORT" app
+APP_MODE="$(setting OPENBOT_APP_MODE dev)"
 if ! identifies_as_openbot "$APP_PORT" app; then
-  (cd app && bun run dev --port "$APP_PORT" --strictPort) >"$LOGS/app.log" 2>&1 &
+  if [ "$APP_MODE" = "serve" ]; then
+    (cd app && bun run serve) >"$LOGS/app.log" 2>&1 &
+  else
+    (cd app && bun run dev --port "$APP_PORT" --strictPort) >"$LOGS/app.log" 2>&1 &
+  fi
 fi
 wait_for_openbot "$APP_PORT" app
 
