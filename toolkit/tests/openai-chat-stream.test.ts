@@ -4,6 +4,7 @@ import { z } from "zod";
 import { BuiltInAgentWithSaneHistory } from "../src/copilotkit/agents";
 import {
   injectThoughtSignatures,
+  normalizeChatCompletionsRequest,
   normalizeChatCompletionsSse,
   resolveCompatibleModel,
 } from "../src/copilotkit/openai-chat-stream";
@@ -697,5 +698,44 @@ describe("injectThoughtSignatures", () => {
       ],
     });
     expect(injectThoughtSignatures(nonGeminiReq, cache)).toBeNull();
+  });
+});
+
+describe("normalizeChatCompletionsRequest", () => {
+  test("defaults reasoning_effort to low for Gemini 3 Flash models when unset, while preserving explicit effort and non-Flash models", () => {
+    const flashLiteReq = JSON.stringify({
+      model: "gemini-3.5-flash-lite",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+    const updatedFlashLite = normalizeChatCompletionsRequest(flashLiteReq);
+    expect(updatedFlashLite).not.toBeNull();
+    expect(JSON.parse(updatedFlashLite ?? "{}").reasoning_effort).toBe("low");
+
+    const flashReq = JSON.stringify({
+      model: "openai/gemini-3.8-flash",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+    const updatedFlash = normalizeChatCompletionsRequest(flashReq);
+    expect(updatedFlash).not.toBeNull();
+    expect(JSON.parse(updatedFlash ?? "{}").reasoning_effort).toBe("low");
+
+    const explicitEffortReq = JSON.stringify({
+      model: "gemini-3.5-flash-lite",
+      reasoning_effort: "high",
+      messages: [{ role: "user", content: "Deep analysis" }],
+    });
+    expect(normalizeChatCompletionsRequest(explicitEffortReq)).toBeNull();
+
+    const proReq = JSON.stringify({
+      model: "gemini-3.1-pro-preview",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+    expect(normalizeChatCompletionsRequest(proReq)).toBeNull();
+
+    const localReq = JSON.stringify({
+      model: "local-fast",
+      messages: [{ role: "user", content: "Hello" }],
+    });
+    expect(normalizeChatCompletionsRequest(localReq)).toBeNull();
   });
 });

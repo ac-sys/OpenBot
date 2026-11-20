@@ -103,7 +103,7 @@ function wrapChatCompletionsFetch(baseFetch?: typeof fetch): typeof fetch {
   ) => {
     const nextInit =
       init && typeof init.body === "string"
-        ? withThoughtSignatures(init, init.body)
+        ? normalizeRequestInit(init, init.body)
         : init;
     // Resolve globalThis.fetch per call so test stubs installed after model creation still apply.
     const response = await (baseFetch ?? globalThis.fetch)(input, nextInit);
@@ -139,13 +139,40 @@ function wrapChatCompletionsFetch(baseFetch?: typeof fetch): typeof fetch {
   return wrapped;
 }
 
-function withThoughtSignatures(
+function normalizeRequestInit(
   init: NonNullable<Parameters<typeof fetch>[1]>,
   bodyText: string,
 ): NonNullable<Parameters<typeof fetch>[1]> {
-  const updated = injectThoughtSignatures(bodyText);
+  const updated = normalizeChatCompletionsRequest(bodyText);
   if (updated === null) return init;
   return { ...init, body: updated };
+}
+
+/**
+ * Normalize an outgoing Chat Completions JSON request body for Gemini 3 compatibility and latency:
+ * - Re-attaches captured `extra_content.google.thought_signature` onto assistant `tool_calls`.
+ * - Defaults `reasoning_effort` to `"low"` for Gemini 3 Flash models when the caller left it unset,
+ *   keeping interactive tool-calling turns responsive while preserving any explicit user/routine pick.
+ */
+export function normalizeChatCompletionsRequest(
+  bodyText: string,
+  signatures: ReadonlyMap<string, string> = thoughtSignatures,
+): string | null {
+  const trimmed = bodyText.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.messages)) return null;
+
+  let modified = applyThoughtSignatures(parsed, signatures);
+  if (applyDefaultGeminiFlashEffort(parsed)) {
+    modified = true;
+  }
+  return modified ? JSON.stringify(parsed) : null;
 }
 
 /**
@@ -165,6 +192,28 @@ export function injectThoughtSignatures(
     return null;
   }
   if (!isRecord(parsed) || !Array.isArray(parsed.messages)) return null;
+  return applyThoughtSignatures(parsed, signatures)
+    ? JSON.stringify(parsed)
+    : null;
+}
+
+function applyDefaultGeminiFlashEffort(
+  parsed: Record<string, unknown>,
+): boolean {
+  if (parsed.reasoning_effort !== undefined) return false;
+  if (typeof parsed.model !== "string") return false;
+  if (!/(?:^|\/)gemini-3(?:\.\d+)?-flash(?:-lite)?$/i.test(parsed.model)) {
+    return false;
+  }
+  parsed.reasoning_effort = "low";
+  return true;
+}
+
+function applyThoughtSignatures(
+  parsed: Record<string, unknown>,
+  signatures: ReadonlyMap<string, string>,
+): boolean {
+  if (!Array.isArray(parsed.messages)) return false;
   const isGeminiModel =
     typeof parsed.model === "string" && /gemini/i.test(parsed.model);
 
@@ -202,7 +251,7 @@ export function injectThoughtSignatures(
       modified = true;
     }
   }
-  return modified ? JSON.stringify(parsed) : null;
+  return modified;
 }
 
 function captureResponseThoughtSignatures(bodyText: string): void {
