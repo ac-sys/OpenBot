@@ -15,6 +15,7 @@ import {
   type ComposerDraft,
   toAgentOptions,
 } from "@/components/channels/composer";
+import { ModelCreditsPill } from "@/components/channels/composer/model-credits-pill";
 import { ModelPicker } from "@/components/channels/composer/model-picker";
 import { ConversationView } from "@/components/channels/conversation-view";
 import { seedMessage } from "@/components/channels/transcript-messages";
@@ -410,11 +411,14 @@ function NewConversation({ composition }: { composition: string }) {
          */
         holdsFilesUntilSent={!group}
         modelPicker={
-          <ModelPicker
-            catalogue={pickable ? models.data : undefined}
-            onChange={draftModel.choose}
-            value={draftModel.value}
-          />
+          <>
+            <ModelPicker
+              catalogue={pickable ? models.data : undefined}
+              onChange={draftModel.choose}
+              value={draftModel.value}
+            />
+            <ModelCreditsPill activeModelId={draftModel.value?.model} />
+          </>
         }
         disabled={Boolean(loadError) || waitingForUrlAgent}
         /*

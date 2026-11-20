@@ -27,6 +27,7 @@ import {
 import { ChannelWorkRows } from "@/components/channels/channel-work";
 import { attachmentModality } from "@/components/channels/chat-messages";
 import { toAgentOptions } from "@/components/channels/composer";
+import { ModelCreditsPill } from "@/components/channels/composer/model-credits-pill";
 import { ModelPicker } from "@/components/channels/composer/model-picker";
 import { ConversationIntro } from "@/components/channels/conversation-intro";
 import { ConversationView } from "@/components/channels/conversation-view";
@@ -1725,15 +1726,18 @@ export function ChannelChat({
             // The `/` menu exposes only skills granted to this Bot.
             commands={skillCommands}
             modelPicker={
-              <ModelPicker
-                catalogue={
-                  botProfile?.runsOnOpenBotModel ? models.data : undefined
-                }
-                disabled={!channel.active}
-                onChange={runModel.choose}
-                saving={runModel.saving}
-                value={runModel.value}
-              />
+              <>
+                <ModelPicker
+                  catalogue={
+                    botProfile?.runsOnOpenBotModel ? models.data : undefined
+                  }
+                  disabled={!channel.active}
+                  onChange={runModel.choose}
+                  saving={runModel.saving}
+                  value={runModel.value}
+                />
+                <ModelCreditsPill activeModelId={runModel.value?.model} />
+              </>
             }
             // Readiness is handled by `say`; deletion is the only disabled-chat state.
             disabled={!channel.active}

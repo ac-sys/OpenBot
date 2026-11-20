@@ -15,6 +15,7 @@ import {
   toAgentOptions,
 } from "@/components/channels/composer";
 import { heldFileOf } from "@/components/channels/composer/attachments";
+import { ModelCreditsPill } from "@/components/channels/composer/model-credits-pill";
 import { WorkingNow } from "@/components/channels/working-now";
 import { BusinessLink } from "@/components/edition/business-link";
 import { SidebarToggleBar } from "@/components/layout/sidebar-toggle";
@@ -220,6 +221,7 @@ function RouteComponent() {
             commands={skillCommands}
             className="w-full max-w-2xl"
             disabled={!fallback}
+            modelPicker={<ModelCreditsPill />}
             // The box reads its words once, when it mounts; a start that fails while this page is
             // open is a new box with them in it.
             key={restores}
