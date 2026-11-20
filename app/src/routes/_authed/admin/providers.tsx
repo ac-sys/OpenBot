@@ -3,6 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import {
   ModelAllowlistSection,
   ModelChoiceSection,
+  ModelCreditsSection,
   ModelUsageSection,
   ProviderSection,
 } from "@/components/admin/controls/model-sections";
@@ -35,6 +36,7 @@ export function ProvidersPage() {
     >
       <ProviderSection />
       <ModelChoiceSection />
+      <ModelCreditsSection />
       {team ? <ModelAllowlistSection /> : null}
       <ModelUsageSection team={team} />
     </PageShell>

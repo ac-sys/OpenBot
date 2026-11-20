@@ -78,10 +78,73 @@ export type ConversationModel = {
   effort: string | null;
 };
 
+export type ModelTier = "local" | "online";
+
+export type ModelCreditUsageRow = {
+  model: string;
+  tier: ModelTier;
+  requests: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+  pricingKnown: boolean;
+  lastUsedAt: string;
+  lastStatus: number;
+  lastError?: string;
+  rateLimit?: {
+    remainingRequests?: number;
+    limitRequests?: number;
+    remainingTokens?: number;
+    limitTokens?: number;
+    resetRequests?: string;
+    resetTokens?: string;
+  };
+};
+
+export type ModelCredits = {
+  systemModels: {
+    defaultChatModel: string;
+    routerModel: string | null;
+    gatewayUrl: string | null;
+  };
+  configuredModels: Array<{
+    id: string;
+    label: string;
+    tier: ModelTier;
+  }>;
+  online: {
+    budgetUsd: number | null;
+    totalSpendUsd: number;
+    remainingUsd: number | null;
+    percentRemaining: number | null;
+    totalTokens: number;
+    totalRequests: number;
+    quotaAlert: string | null;
+    billingNote: string;
+    billingUrl: string | null;
+    liveBalance: {
+      provider: string;
+      remainingUsd: number;
+      totalCreditsUsd?: number;
+      usedUsd?: number;
+      checkedAt: string;
+    } | null;
+    resetAt: string | null;
+    updatedAt: string | null;
+  };
+  local: {
+    totalTokens: number;
+    totalRequests: number;
+  };
+  byModel: ModelCreditUsageRow[];
+};
+
 export const modelKeys = {
   all: ["models"] as const,
   catalogue: ["models", "catalogue"] as const,
   available: ["models", "available"] as const,
+  credits: ["models", "credits"] as const,
   conversation: (channelId: string) =>
     ["models", "conversation", channelId] as const,
 };
@@ -127,4 +190,36 @@ export function conversationModelQueryOptions(channelId: string) {
         })
       ).json(),
   });
+}
+
+export function modelCreditsQueryOptions() {
+  return queryOptions({
+    queryKey: modelKeys.credits,
+    queryFn: async (): Promise<ModelCredits> =>
+      (
+        await client("/api/models/credits", {
+          fallback: "Couldn't load online model credits",
+        })
+      ).json(),
+    refetchInterval: 15_000,
+  });
+}
+
+export async function updateModelCreditsBudget(
+  budgetUsd: number | null,
+): Promise<ModelCredits> {
+  const response = await client("/api/models/credits/budget", {
+    method: "PUT",
+    body: { budgetUsd },
+    fallback: "Couldn't update online credit balance",
+  });
+  return response.json();
+}
+
+export async function resetModelCreditsUsage(): Promise<ModelCredits> {
+  const response = await client("/api/models/credits/reset", {
+    method: "POST",
+    fallback: "Couldn't reset usage meter",
+  });
+  return response.json();
 }

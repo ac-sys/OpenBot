@@ -1,14 +1,19 @@
 import {
+  IconAlertTriangle,
   IconBrain,
   IconChartBar,
   IconChevronRight,
   IconCloud,
+  IconCoin,
+  IconCpu,
   IconCube,
+  IconExternalLink,
   IconKey,
+  IconRefresh,
   IconSearch,
   IconShieldLock,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { HarnessMark } from "@/components/agents/harness-mark";
 import {
@@ -48,6 +53,10 @@ import {
   availableModelsQueryOptions,
   type ModelOption,
   type ModelSource,
+  modelCreditsQueryOptions,
+  modelKeys,
+  resetModelCreditsUsage,
+  updateModelCreditsBudget,
 } from "@/lib/models/queries";
 import { ControlsSection } from "./controls-section";
 
@@ -520,6 +529,249 @@ export function ModelUsageSection({ team }: { team: boolean }) {
             </div>
           ))}
         </PageRows>
+      )}
+    </PageSection>
+  );
+}
+
+function formatUsd(value: number): string {
+  if (value === 0) return "$0.00";
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+function formatTokens(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return String(count);
+}
+
+/**
+ * Admin, Providers: shows active local vs. online models, live tracked token spend, and remaining
+ * online credits (either live from providers with a balance API like OpenRouter, or computed from
+ * the admin's configured credit budget minus tracked usage for providers like Google Gemini).
+ */
+export function ModelCreditsSection() {
+  const queryClient = useQueryClient();
+  const credits = useQuery(modelCreditsQueryOptions());
+  const [budgetDraft, setBudgetDraft] = useState("");
+  const [editingBudget, setEditingBudget] = useState(false);
+
+  const saveBudget = useMutation({
+    mutationFn: (value: number | null) => updateModelCreditsBudget(value),
+    onSuccess: () => {
+      setEditingBudget(false);
+      void queryClient.invalidateQueries({ queryKey: modelKeys.credits });
+    },
+  });
+
+  const resetUsage = useMutation({
+    mutationFn: () => resetModelCreditsUsage(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: modelKeys.credits });
+    },
+  });
+
+  const data = credits.data;
+  const online = data?.online;
+
+  return (
+    <PageSection
+      description="Live token usage, estimated spend, and remaining credit balance for online models vs. free local models."
+      title="Online credits & active models"
+    >
+      {credits.isPending ? null : credits.error || !data || !online ? (
+        <p className="mt-4 text-destructive text-sm" role="alert">
+          Couldn't load model credit tracking. Reload the page.
+        </p>
+      ) : (
+        <div className="space-y-4">
+          {online.quotaAlert ? (
+            <div
+              className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-destructive text-sm"
+              role="alert"
+            >
+              <IconAlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>{online.quotaAlert}</span>
+            </div>
+          ) : null}
+
+          <PageRows>
+            <Item size="sm">
+              <ItemMedia variant="icon">
+                <IconCoin />
+              </ItemMedia>
+              <ItemContent>
+                <ItemTitle>
+                  {online.remainingUsd !== null
+                    ? `${formatUsd(online.remainingUsd)} remaining`
+                    : `${formatUsd(online.totalSpendUsd)} estimated online spend`}
+                  {online.budgetUsd !== null
+                    ? ` (of ${formatUsd(online.budgetUsd)} · ${online.percentRemaining ?? 0}%)`
+                    : ""}
+                </ItemTitle>
+                <ItemDescription>
+                  Online: {online.totalRequests}{" "}
+                  {online.totalRequests === 1 ? "call" : "calls"} ·{" "}
+                  {formatTokens(online.totalTokens)} tokens (
+                  {formatUsd(online.totalSpendUsd)} spent) · Local Ollama:{" "}
+                  {data.local.totalRequests}{" "}
+                  {data.local.totalRequests === 1 ? "call" : "calls"} (
+                  {formatTokens(data.local.totalTokens)} tokens, free)
+                </ItemDescription>
+              </ItemContent>
+              <ItemActions>
+                <div className="flex flex-wrap items-center gap-2">
+                  {editingBudget ? (
+                    <form
+                      className="flex items-center gap-1.5"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const trimmed = budgetDraft.trim();
+                        if (!trimmed) {
+                          saveBudget.mutate(null);
+                          return;
+                        }
+                        const parsed = Number(trimmed);
+                        if (Number.isFinite(parsed) && parsed >= 0) {
+                          saveBudget.mutate(parsed);
+                        }
+                      }}
+                    >
+                      <Input
+                        aria-label="Online credit balance in USD"
+                        className="h-8 w-28"
+                        min="0"
+                        onChange={(e) => setBudgetDraft(e.target.value)}
+                        placeholder="e.g. 10.00"
+                        step="0.01"
+                        type="number"
+                        value={budgetDraft}
+                      />
+                      <Button
+                        disabled={saveBudget.isPending}
+                        size="sm"
+                        type="submit"
+                      >
+                        Save
+                      </Button>
+                      <Button
+                        onClick={() => setEditingBudget(false)}
+                        size="sm"
+                        type="button"
+                        variant="ghost"
+                      >
+                        Cancel
+                      </Button>
+                    </form>
+                  ) : (
+                    <Button
+                      onClick={() => {
+                        setBudgetDraft(
+                          online.budgetUsd !== null
+                            ? String(online.budgetUsd)
+                            : "",
+                        );
+                        setEditingBudget(true);
+                      }}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {online.budgetUsd !== null
+                        ? "Update balance"
+                        : "Set credit balance"}
+                    </Button>
+                  )}
+                  <Button
+                    disabled={resetUsage.isPending}
+                    onClick={() => resetUsage.mutate()}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <IconRefresh className="mr-1 size-3.5" />
+                    Reset meter
+                  </Button>
+                  {online.billingUrl ? (
+                    <a
+                      className="inline-flex items-center gap-1 text-muted-foreground text-xs underline-offset-4 hover:text-foreground hover:underline"
+                      href={online.billingUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      Billing console
+                      <IconExternalLink className="size-3" />
+                    </a>
+                  ) : null}
+                </div>
+              </ItemActions>
+            </Item>
+
+            <Separator />
+
+            <Item size="sm">
+              <ItemMedia variant="icon">
+                <IconCpu />
+              </ItemMedia>
+              <ItemContent>
+                <ItemTitle>System model routing</ItemTitle>
+                <ItemDescription>
+                  Default chat: {data.systemModels.defaultChatModel} · Router /
+                  titling: {data.systemModels.routerModel ?? "same as chat"}
+                  {data.systemModels.gatewayUrl
+                    ? ` · Gateway: ${data.systemModels.gatewayUrl}`
+                    : ""}
+                </ItemDescription>
+              </ItemContent>
+            </Item>
+          </PageRows>
+
+          <p className="text-muted-foreground text-xs">{online.billingNote}</p>
+
+          {data.byModel.length > 0 ? (
+            <PageRows>
+              {data.byModel.map((row, index) => (
+                <div key={row.model}>
+                  {index > 0 ? <Separator /> : null}
+                  <Item size="sm">
+                    <ItemMedia variant="icon">
+                      {row.tier === "local" ? <IconCpu /> : <IconCloud />}
+                    </ItemMedia>
+                    <ItemContent>
+                      <ItemTitle>
+                        {row.model}{" "}
+                        <span className="ml-1 font-normal text-muted-foreground text-xs">
+                          ({row.tier === "local" ? "Local · Free" : "Online"})
+                        </span>
+                      </ItemTitle>
+                      <ItemDescription>
+                        {row.requests} {row.requests === 1 ? "call" : "calls"} ·{" "}
+                        {formatTokens(row.promptTokens)} in /{" "}
+                        {formatTokens(row.completionTokens)} out
+                        {row.rateLimit?.remainingRequests !== undefined
+                          ? ` · ${row.rateLimit.remainingRequests}${row.rateLimit.limitRequests ? `/${row.rateLimit.limitRequests}` : ""} req left`
+                          : ""}
+                        {row.lastStatus >= 400
+                          ? ` · Last HTTP ${row.lastStatus}`
+                          : ""}
+                      </ItemDescription>
+                    </ItemContent>
+                    <ItemActions>
+                      <span className="font-medium text-sm">
+                        {row.tier === "local"
+                          ? "Free"
+                          : row.pricingKnown
+                            ? formatUsd(row.estimatedCostUsd)
+                            : "Metered"}
+                      </span>
+                    </ItemActions>
+                  </Item>
+                </div>
+              ))}
+            </PageRows>
+          ) : null}
+        </div>
       )}
     </PageSection>
   );

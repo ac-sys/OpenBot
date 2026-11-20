@@ -57,3 +57,9 @@ venv/
 
 # The Recorder extension's signing key never enters the repository (Decision 9).
 extension/**/*.pem
+
+# Added by CopilotKit CLI: browser snapshots a coding agent writes.
+.playwright-mcp/
+
+# Local model usage and online credit tracking ledger.
+.openbot-model-credits.json*

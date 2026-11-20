@@ -3,6 +3,11 @@ import {
   type BuiltInAgentConfiguration,
   resolveModel,
 } from "@copilotkit/runtime/v2";
+import {
+  modelCredits,
+  parseLiteLLMResponseCost,
+  parseRateLimitHeaders,
+} from "./model-credits";
 
 type Model = Extract<
   BuiltInAgentClassicConfig["model"],
@@ -101,13 +106,38 @@ function wrapChatCompletionsFetch(baseFetch?: typeof fetch): typeof fetch {
     input: Parameters<typeof fetch>[0],
     init?: Parameters<typeof fetch>[1],
   ) => {
+    const requestModel =
+      init && typeof init.body === "string"
+        ? extractRequestModel(init.body)
+        : undefined;
     const nextInit =
       init && typeof init.body === "string"
         ? normalizeRequestInit(init, init.body)
         : init;
     // Resolve globalThis.fetch per call so test stubs installed after model creation still apply.
     const response = await (baseFetch ?? globalThis.fetch)(input, nextInit);
-    if (!response.ok || !response.body) return response;
+    const rateLimit = parseRateLimitHeaders(response.headers);
+    const reportedCostUsd = parseLiteLLMResponseCost(response.headers);
+
+    if (!response.ok) {
+      if (
+        requestModel &&
+        (response.status === 429 || response.status === 402)
+      ) {
+        const snippet = await response
+          .clone()
+          .text()
+          .catch(() => "");
+        modelCredits.recordUsage({
+          model: requestModel,
+          status: response.status,
+          rateLimit,
+          errorMessage: snippet || response.statusText,
+        });
+      }
+      return response;
+    }
+    if (!response.body) return response;
     const contentType = (
       response.headers.get("content-type") ?? ""
     ).toLowerCase();
@@ -115,15 +145,43 @@ function wrapChatCompletionsFetch(baseFetch?: typeof fetch): typeof fetch {
       const headers = new Headers(response.headers);
       headers.delete("content-length");
       headers.delete("content-encoding");
-      return new Response(normalizeChatCompletionsSse(response.body), {
-        status: response.status,
-        statusText: response.statusText,
-        headers,
-      });
+      return new Response(
+        normalizeChatCompletionsSse(response.body, (telemetry) => {
+          const modelName = telemetry.model ?? requestModel;
+          if (!modelName) return;
+          modelCredits.recordUsage({
+            model: modelName,
+            promptTokens: telemetry.promptTokens,
+            completionTokens: telemetry.completionTokens,
+            totalTokens: telemetry.totalTokens,
+            reportedCostUsd,
+            status: response.status,
+            rateLimit,
+          });
+        }),
+        {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        },
+      );
     }
     if (contentType.includes("application/json")) {
       const text = await response.text();
       captureResponseThoughtSignatures(text);
+      const telemetry = extractJsonUsageTelemetry(text);
+      const modelName = telemetry.model ?? requestModel;
+      if (modelName) {
+        modelCredits.recordUsage({
+          model: modelName,
+          promptTokens: telemetry.promptTokens,
+          completionTokens: telemetry.completionTokens,
+          totalTokens: telemetry.totalTokens,
+          reportedCostUsd,
+          status: response.status,
+          rateLimit,
+        });
+      }
       const headers = new Headers(response.headers);
       headers.delete("content-length");
       headers.delete("content-encoding");
@@ -172,7 +230,64 @@ export function normalizeChatCompletionsRequest(
   if (applyDefaultGeminiFlashEffort(parsed)) {
     modified = true;
   }
+  if (parsed.stream === true && parsed.stream_options === undefined) {
+    parsed.stream_options = { include_usage: true };
+    modified = true;
+  }
   return modified ? JSON.stringify(parsed) : null;
+}
+
+function extractRequestModel(bodyText: string): string | undefined {
+  const trimmed = bodyText.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+  try {
+    const parsed = JSON.parse(bodyText) as { model?: unknown };
+    return typeof parsed.model === "string" && parsed.model.trim().length > 0
+      ? parsed.model.trim()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+type UsageTelemetry = {
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+};
+
+function extractUsageFields(
+  parsed: Record<string, unknown>,
+  target: UsageTelemetry,
+): void {
+  if (typeof parsed.model === "string" && parsed.model.trim().length > 0) {
+    target.model = parsed.model.trim();
+  }
+  const usage = parsed.usage;
+  if (!isRecord(usage)) return;
+  if (typeof usage.prompt_tokens === "number") {
+    target.promptTokens = usage.prompt_tokens;
+  }
+  if (typeof usage.completion_tokens === "number") {
+    target.completionTokens = usage.completion_tokens;
+  }
+  if (typeof usage.total_tokens === "number") {
+    target.totalTokens = usage.total_tokens;
+  }
+}
+
+function extractJsonUsageTelemetry(bodyText: string): UsageTelemetry {
+  const telemetry: UsageTelemetry = {};
+  const trimmed = bodyText.trim();
+  if (!trimmed.startsWith("{")) return telemetry;
+  try {
+    const parsed = JSON.parse(bodyText);
+    if (isRecord(parsed)) extractUsageFields(parsed, telemetry);
+  } catch {
+    // Ignore malformed JSON.
+  }
+  return telemetry;
 }
 
 /**
@@ -301,14 +416,17 @@ function extractThoughtSignature(call: Record<string, unknown>): string | null {
 
 /**
  * Normalize an OpenAI Chat Completions SSE byte stream so every choice and streamed tool-call delta
- * carries a numeric `index`, while capturing any Gemini `thought_signature` per tool-call id.
+ * carries a numeric `index`, while capturing any Gemini `thought_signature` per tool-call id and
+ * optional token usage telemetry on stream completion.
  */
 export function normalizeChatCompletionsSse(
   body: ReadableStream<Uint8Array>,
+  onComplete?: (telemetry: UsageTelemetry) => void,
 ): ReadableStream<Uint8Array> {
   const decode = new TextDecoder();
   const encode = new TextEncoder();
   const choiceState = new Map<number, ChoiceToolCallState>();
+  const telemetry: UsageTelemetry = {};
   let buffer = "";
   let rawLines: string[] = [];
   let metaLines: string[] = [];
@@ -330,7 +448,7 @@ export function normalizeChatCompletionsSse(
       return;
     }
     const payload = dataLines.join("\n");
-    const normalized = normalizeChunkPayload(payload, choiceState);
+    const normalized = normalizeChunkPayload(payload, choiceState, telemetry);
     if (normalized === null) {
       controller.enqueue(encode.encode(`${rawLines.join("\n")}${trailing}`));
     } else {
@@ -387,6 +505,7 @@ export function normalizeChatCompletionsSse(
         if (rawLines.length > 0) {
           flushEvent(controller, false);
         }
+        onComplete?.(telemetry);
       },
     }),
   );
@@ -399,6 +518,7 @@ export function normalizeChatCompletionsSse(
 function normalizeChunkPayload(
   payload: string,
   choiceState: Map<number, ChoiceToolCallState>,
+  telemetry?: UsageTelemetry,
 ): string | null {
   const trimmed = payload.trim();
   if (!trimmed || trimmed === "[DONE]" || !trimmed.startsWith("{")) return null;
@@ -408,7 +528,9 @@ function normalizeChunkPayload(
   } catch {
     return null;
   }
-  if (!isRecord(parsed) || !Array.isArray(parsed.choices)) return null;
+  if (!isRecord(parsed)) return null;
+  if (telemetry) extractUsageFields(parsed, telemetry);
+  if (!Array.isArray(parsed.choices)) return null;
 
   let modified = false;
   for (let position = 0; position < parsed.choices.length; position++) {

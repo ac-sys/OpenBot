@@ -26,6 +26,11 @@
  *
  * Never throws: a listing that cannot be read leaves the deployment's own model and nothing to pick.
  */
+import {
+  classifyModelTier,
+  fetchLiveProviderBalance,
+  modelCredits,
+} from "@openbot/toolkit/copilotkit/model-credits";
 import { Hono, type MiddlewareHandler } from "hono";
 import { type AppVariables, requireAdmin } from "./auth/guards";
 import type { RuntimeModel } from "./copilot";
@@ -1151,6 +1156,57 @@ export function createModelRoutes(
     const denied = requireAdmin(context);
     if (denied) return denied;
     return context.json(await catalogue.available());
+  });
+  routes.get("/credits", async (context) => {
+    const [listing, liveBalance] = await Promise.all([
+      catalogue.read(),
+      fetchLiveProviderBalance(process.env),
+    ]);
+    const snapshot = modelCredits.snapshot(process.env, {
+      defaultChatModel: listing.default,
+      liveBalance,
+    });
+    return context.json({
+      ...snapshot,
+      configuredModels: listing.models.map((model) => ({
+        id: model.id,
+        label: model.label,
+        tier: classifyModelTier(model.id),
+      })),
+    });
+  });
+  routes.put("/credits/budget", async (context) => {
+    const denied = requireAdmin(context);
+    if (denied) return denied;
+    const body = (await context.req.json().catch(() => null)) as {
+      budgetUsd?: unknown;
+    } | null;
+    const raw = body?.budgetUsd;
+    if (
+      raw !== null &&
+      (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0)
+    ) {
+      return context.json(
+        {
+          error: "Send a non-negative number for budgetUsd, or null to clear.",
+        },
+        400,
+      );
+    }
+    modelCredits.setBudgetUsd(raw);
+    const listing = await catalogue.read();
+    return context.json(
+      modelCredits.snapshot(process.env, { defaultChatModel: listing.default }),
+    );
+  });
+  routes.post("/credits/reset", async (context) => {
+    const denied = requireAdmin(context);
+    if (denied) return denied;
+    modelCredits.resetUsage();
+    const listing = await catalogue.read();
+    return context.json(
+      modelCredits.snapshot(process.env, { defaultChatModel: listing.default }),
+    );
   });
   return routes;
 }
